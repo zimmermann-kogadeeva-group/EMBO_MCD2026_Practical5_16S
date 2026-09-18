@@ -1,0 +1,514 @@
+---
+title: "From rel. abundance data to microbial community dynamics"
+subtitle: "Computational 16S practical — EMBO Microbial Communities 2026"
+author: "Fabian Springer"
+date: "7 October 2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 9,
+  fig.height = 5
+)
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(vegan)
+  library(scales)
+  library(ggrepel)
+})
+
+document_dir <- getwd()
+project_root <- normalizePath(
+  file.path(document_dir, ".."),
+  mustWork = TRUE
+)
+document_path <- file.path(
+  document_dir,
+  "16S_analysis_and_visualization.Rmd"
+)
+abundance_path <- file.path(
+  project_root,
+  "data",
+  "combined_relative_abundance.csv"
+)
+prepared_metadata_path <- file.path(project_root, "data", "metadata.tsv")
+
+selected_rank <- "S"
+top_n_taxa <- 10L
+sum_tolerance <- 1e-6
+```
+
+# Learning objectives
+
+By the end of this practical, you should be able to:
+
+1. inspect and validate a taxonomic relative-abundance table;
+2. reshape sparse taxonomic results into a complete sample-by-taxon matrix;
+3. visualize community composition without forgetting that the data are compositional;
+4. compare samples using Bray–Curtis dissimilarity and principal coordinate analysis (PCoA); and
+5. connect barcode-level results to the experimental design using sample metadata.
+
+> **Practical scope.** Taxonomic classification has already been run. We start from the combined NanoCLUST relative-abundance output so that the session can focus on interpretation rather than waiting for a sequencing pipeline.
+
+Before loading the taxonomic profiles, import the cleaned experimental sample
+sheet. Its `Sample_ID` column contains the barcode identifier used by the
+NanoCLUST output. The identity of the six `Vincent_*` samples is unresolved, so
+they are excluded from both the metadata and abundance profiles before any
+summaries, plots, or distance calculations. They can be restored once their
+experimental role has been clarified.
+
+```{r import-experimental-metadata}
+stopifnot(file.exists(prepared_metadata_path))
+
+experimental_metadata_raw_df <- read_tsv(
+  prepared_metadata_path,
+  show_col_types = FALSE,
+  progress = FALSE
+)
+
+stopifnot(
+  all(
+    c(
+      "Sample_ID",
+      "embl_id",
+      "axenic_xenic_media",
+      "timepoint_d",
+      "replicate"
+    ) %in% names(experimental_metadata_raw_df)
+  ),
+  !anyNA(experimental_metadata_raw_df$Sample_ID),
+  !anyDuplicated(experimental_metadata_raw_df$Sample_ID)
+)
+
+sample_meta_df <- experimental_metadata_raw_df %>%
+  filter(!str_detect(axenic_xenic_media, "^Vincent_")) %>%
+  mutate(
+    condition = axenic_xenic_media,
+    condition = factor(condition, levels = c("Axenic", "Xenic", "Media")),
+    timepoint = parse_number(timepoint_d),
+    replicate = factor(replicate),
+    sample_label = str_c(
+      "T",
+      timepoint,
+      "_",
+      str_to_lower(as.character(replicate))
+    )
+  ) %>%
+  select(
+    Sample_ID,
+    sample_label,
+    condition,
+    timepoint,
+    replicate,
+    everything()
+  )
+
+stopifnot(
+  nrow(experimental_metadata_raw_df) - nrow(sample_meta_df) == 6L,
+  nrow(sample_meta_df) == 18L,
+  !anyNA(
+    sample_meta_df[
+      c(
+        "Sample_ID",
+        "sample_label",
+        "condition",
+        "timepoint",
+        "replicate"
+      )
+    ]
+  ),
+  !anyDuplicated(sample_meta_df$Sample_ID),
+  !anyDuplicated(sample_meta_df[c("condition", "sample_label")])
+)
+```
+
+# 1. Load and inspect the NanoCLUST output
+
+The input contains one taxonomic assignment per sample and taxonomic rank. `tax` uses the codes `O`, `F`, `G`, and `S` for order, family, genus, and species.
+
+```{r import-data}
+stopifnot(file.exists(abundance_path))
+
+abundance_raw_df <- read_csv(
+  abundance_path,
+  show_col_types = FALSE,
+  progress = FALSE
+)
+
+required_columns <- c("sample", "tax", "taxid", "rel_abundance")
+stopifnot(all(required_columns %in% names(abundance_raw_df)))
+
+abundance_df <- abundance_raw_df %>%
+  transmute(
+    Sample_ID = sample %>%
+      str_remove("^rel_abundance_") %>%
+      str_remove("_concat$"),
+    tax_rank = tax,
+    taxon = taxid,
+    rel_abundance = as.numeric(rel_abundance)
+  ) %>%
+  semi_join(
+    sample_meta_df %>% select(Sample_ID),
+    by = "Sample_ID"
+  )
+
+# get all available tax ranks
+all_tax_ranks <- unique(abundance_df$tax_rank)
+
+stopifnot(
+  !anyNA(abundance_df),
+  !anyDuplicated(abundance_df[c("Sample_ID", "tax_rank", "taxon")]),
+  setequal(sample_meta_df$Sample_ID, abundance_df$Sample_ID),
+  all(abundance_df$rel_abundance >= 0),
+  all(abundance_df$rel_abundance <= 1)
+)
+```
+
+Before plotting, summarize the object rather than printing all rows.
+
+```{r compact-summary}
+rank_labels <- c(O = "Order", F = "Family", G = "Genus", S = "Species")
+
+input_summary_df <- abundance_df %>%
+  group_by(tax_rank) %>%
+  summarise(
+    rank = unname(rank_labels[first(tax_rank)]),
+    samples = n_distinct(Sample_ID),
+    taxa = n_distinct(taxon),
+    nonzero_assignments = n(),
+    .groups = "drop"
+  ) %>%
+  select(rank, everything(), -tax_rank)
+
+knitr::kable(input_summary_df)
+```
+
+## Check that each profile sums to one
+
+Relative-abundance profiles should sum to one separately for every sample and rank.
+
+```{r validate-profile-sums}
+profile_sum_df <- abundance_df %>%
+  group_by(Sample_ID, tax_rank) %>%
+  summarise(profile_sum = sum(rel_abundance), .groups = "drop")
+
+stopifnot(all(abs(profile_sum_df$profile_sum - 1) < sum_tolerance))
+
+profile_sum_df %>%
+  summarise(
+    profiles_checked = n(),
+    minimum_sum = min(profile_sum),
+    maximum_sum = max(profile_sum)
+  ) %>%
+  knitr::kable(digits = 6)
+```
+
+**Discuss:** What information can we check in a relative-abundance table? What information has already been lost compared with the raw read counts?
+
+# 2. Choose a taxonomic rank and complete missing combinations
+
+We use species-level assignments for this practical because full-length Nanopore 16S reads can provide fine taxonomic resolution. Species labels are still hypotheses: classification depends on sequence quality, the reference database, conserved 16S regions, and the classifier.
+
+The input is sparse: a taxon absent from a sample has no row. For plotting and distance calculations, we explicitly complete those missing sample–taxon combinations with zero.
+
+```{r complete-species-table}
+analysis_df <- abundance_df %>%
+  filter(tax_rank == selected_rank) %>%
+  select(Sample_ID, taxon, rel_abundance) %>%
+  complete(Sample_ID, taxon, fill = list(rel_abundance = 0))
+
+stopifnot(
+  !anyNA(analysis_df),
+  !anyDuplicated(analysis_df[c("Sample_ID", "taxon")])
+)
+
+completed_sum_df <- analysis_df %>%
+  group_by(Sample_ID) %>%
+  summarise(profile_sum = sum(rel_abundance), .groups = "drop")
+
+stopifnot(all(abs(completed_sum_df$profile_sum - 1) < sum_tolerance))
+```
+
+# 3. Which organisms dominate the profiles?
+
+A stacked bar chart gives an intuitive first view. To keep the legend readable, the ten most abundant taxa across all samples are shown individually and the remainder are grouped as `Other taxa`.
+
+```{r prepare-composition}
+taxon_summary_df <- analysis_df %>%
+  group_by(taxon) %>%
+  summarise(
+    mean_abundance = mean(rel_abundance),
+    maximum_abundance = max(rel_abundance),
+    prevalence = mean(rel_abundance > 0),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_abundance))
+
+top_taxa <- taxon_summary_df %>%
+  slice_head(n = top_n_taxa) %>%
+  pull(taxon)
+
+sample_order <- sample_meta_df %>%
+  arrange(condition, timepoint, replicate, sample_label) %>%
+  pull(Sample_ID)
+
+composition_df <- analysis_df %>%
+  left_join(
+    sample_meta_df %>% select(Sample_ID, sample_label, condition),
+    by = "Sample_ID"
+  ) %>%
+  mutate(
+    display_taxon = if_else(taxon %in% top_taxa, taxon, "Other taxa"),
+    Sample_ID = factor(Sample_ID, levels = sample_order)
+  ) %>%
+  group_by(condition, Sample_ID, sample_label, display_taxon) %>%
+  summarise(rel_abundance = sum(rel_abundance), .groups = "drop")
+
+display_levels <- c(top_taxa, "Other taxa")
+taxon_colors <- setNames(
+  c(RColorBrewer::brewer.pal(length(top_taxa), "Paired"), "grey70"),
+  display_levels
+)
+
+composition_df <- composition_df %>%
+  mutate(display_taxon = factor(display_taxon, levels = rev(display_levels)))
+```
+
+```{r composition-plot}
+composition_plot <- ggplot(
+  composition_df,
+  aes(x = Sample_ID, y = rel_abundance, fill = display_taxon)
+) +
+  geom_col(width = 0.9) +
+  facet_grid(~condition, scales = "free_x", space = "free_x") +
+  scale_fill_manual(values = taxon_colors, breaks = display_levels) +
+  scale_x_discrete(
+    labels = setNames(sample_meta_df$sample_label, sample_meta_df$Sample_ID)
+  ) +
+  scale_y_continuous(labels = label_percent(), expand = expansion(mult = c(0, 0.02))) +
+  labs(
+    title = "Species-level community profiles",
+    subtitle = "Top taxa by mean relative abundance; remaining taxa are grouped",
+    x = "Sample",
+    y = "Relative abundance",
+    fill = "Taxon"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1),
+    panel.grid.minor = element_blank()
+  )
+
+composition_plot
+```
+
+```{r dominant-taxa-summary}
+dominant_taxon_df <- analysis_df %>%
+  group_by(Sample_ID) %>%
+  slice_max(rel_abundance, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+dominant_taxon_df %>%
+  count(taxon, name = "samples_dominated", sort = TRUE) %>%
+  knitr::kable()
+```
+
+**Discuss:** A highly abundant assignment may represent a bacterial community member, a host-associated organelle signal, contamination, or a classification artefact. What additional evidence would you want before interpreting it biologically?
+
+## A compositionality thought experiment
+
+Every sample sums to 100%. If one taxon doubles while all absolute cell counts remain unchanged, the relative abundance of every other taxon must fall. Therefore, relative abundance alone cannot tell us whether a taxon grew, declined, or merely changed relative to another organism.
+
+# 4. Compare complete communities with Bray–Curtis dissimilarity
+
+Bray–Curtis dissimilarity compares the complete abundance profiles of two samples. It is zero for identical profiles and approaches one as profiles become increasingly different.
+
+```{r bray-curtis-pcoa}
+species_mat <- analysis_df %>%
+  pivot_wider(names_from = taxon, values_from = rel_abundance) %>%
+  arrange(match(Sample_ID, sample_order)) %>%
+  column_to_rownames("Sample_ID") %>%
+  as.matrix()
+
+stopifnot(
+  is.numeric(species_mat),
+  !anyNA(species_mat),
+  all(abs(rowSums(species_mat) - 1) < sum_tolerance)
+)
+
+bray_distance <- vegdist(species_mat, method = "bray")
+pcoa_fit <- cmdscale(bray_distance, k = 2, eig = TRUE, add = TRUE)
+
+positive_eigenvalues <- pcoa_fit$eig[pcoa_fit$eig > 0]
+axis_variance <- 100 * pcoa_fit$eig[1:2] / sum(positive_eigenvalues)
+
+pcoa_df <- as_tibble(pcoa_fit$points, rownames = "Sample_ID") %>%
+  rename(PCo1 = V1, PCo2 = V2) %>%
+  left_join(
+    sample_meta_df %>%
+      select(Sample_ID, sample_label, condition),
+    by = "Sample_ID"
+  )
+
+stopifnot(
+  nrow(pcoa_df) == nrow(sample_meta_df),
+  !anyNA(pcoa_df[c("Sample_ID", "sample_label", "condition")])
+)
+
+condition_levels <- levels(pcoa_df$condition)
+condition_colors <- setNames(
+  colorRampPalette(RColorBrewer::brewer.pal(8, "Dark2"))(
+    length(condition_levels)
+  ),
+  condition_levels
+)
+```
+
+```{r pcoa-plot}
+pcoa_plot <- ggplot(pcoa_df, aes(PCo1, PCo2, color = condition)) +
+  geom_point(size = 3) +
+  geom_text_repel(
+    aes(label = sample_label),
+    size = 3,
+    max.overlaps = 20,
+    min.segment.length = 0,
+    seed = 420
+  ) +
+  scale_color_manual(values = condition_colors) +
+  labs(
+    title = "Bray-Curtis PCoA of species profiles",
+    subtitle = "Each point is one sample; labels show timepoint and replicate",
+    x = sprintf("PCo1 (%.1f%%)", axis_variance[1]),
+    y = sprintf("PCo2 (%.1f%%)", axis_variance[2]),
+    color = "Condition"
+  ) +
+  coord_equal() +
+  theme_bw(base_size = 13) +
+  theme(panel.grid.minor = element_blank())
+
+pcoa_plot
+```
+
+**Discuss:** Which samples are similar? Do the clusters reflect condition,
+time, sequencing artefacts, or host-associated signal?
+
+# 5. Follow abundant taxa through time
+
+The retained experimental metadata map every axenic, xenic, and media sample
+to its condition, sampling time in days, and biological replicate.
+
+```{r taxon-time-courses}
+time_course_taxa <- taxon_summary_df %>%
+  slice_head(n = 6) %>%
+  pull(taxon)
+
+time_course_df <- analysis_df %>%
+  filter(taxon %in% time_course_taxa) %>%
+  left_join(sample_meta_df, by = "Sample_ID")
+
+ggplot(
+  time_course_df,
+  aes(
+    x = timepoint,
+    y = rel_abundance,
+    color = condition,
+    group = interaction(condition, replicate)
+  )
+) +
+  geom_line(alpha = 0.55) +
+  geom_point(aes(shape = replicate), size = 2) +
+  facet_wrap(~taxon, scales = "free_y") +
+  scale_color_manual(values = condition_colors) +
+  scale_y_continuous(labels = label_percent()) +
+  labs(
+    title = "Trajectories of the six most abundant assignments",
+    x = "Timepoint (days)",
+    y = "Relative abundance",
+    color = "Condition",
+    shape = "Replicate"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "italic")
+  )
+```
+
+**Discuss:** Do replicate cultures follow similar trajectories? Which changes appear condition-specific? What could relative abundance conceal?
+
+# 6. What we can—and cannot—conclude
+
+## Supported by this table
+
+- which taxonomic assignments dominate each relative profile;
+- which samples have similar overall species compositions;
+- whether replicate trajectories appear qualitatively consistent once metadata are added; and
+- which taxa are candidates for follow-up.
+
+## Not supported without additional inputs
+
+- sequencing depth or library-size quality control;
+- rarefaction or count-based alpha diversity;
+- absolute microbial growth or decline;
+- a reliable xenic/axenic or time-course interpretation without barcode metadata; and
+- confirmatory hypothesis testing without a prespecified repeated-measures design.
+
+# Further steps (optional)
+
+> **Draft extension.** These prompts provide a temporary starting point for
+> participants who finish early. Trainers can refine or replace them as the
+> practical develops.
+
+## Compare taxonomic ranks
+
+Change `selected_rank` near the beginning of the document from species (`S`)
+to genus (`G`) and rerun the analysis.
+
+- Which composition and ordination patterns remain stable?
+- Which apparent differences depend on the selected taxonomic rank?
+- Why might genus-level assignments be more reliable for some 16S reads?
+
+## Investigate an unexpected dominant assignment
+
+Choose one abundant assignment from the axenic samples and examine where it
+occurs across conditions and timepoints.
+
+- Is it specific to axenic cultures or also present in xenic and media samples?
+- Could it represent a bacterium, host-associated chloroplast signal,
+  contamination, or a database/classification limitation?
+- What additional evidence would distinguish these explanations?
+
+## Focus on one shared timepoint
+
+Choose a timepoint represented in both axenic and xenic cultures and compare
+the two biological replicates directly.
+
+- Are within-condition replicates more similar than the two conditions?
+- Which assignments contribute most strongly to the difference?
+- Does the conclusion change when you inspect individual samples instead of
+  condition averages?
+
+# Take-home messages
+
+1. Validate the input and experimental mapping before interpreting a plot.
+2. Missing taxon rows are not missing samples; complete them explicitly with zero.
+3. Relative abundances are constrained to sum to one and cannot establish absolute growth.
+4. Ordination summarizes differences—it does not explain their biological cause.
+5. Host-associated signal, database choice, and taxonomic uncertainty are part of the result, not nuisances to hide.
+
+# Session information
+
+```{r session-information}
+sessionInfo()
+```
