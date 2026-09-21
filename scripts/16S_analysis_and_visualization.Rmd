@@ -26,23 +26,12 @@ suppressPackageStartupMessages({
   library(vegan)
   library(scales)
   library(ggrepel)
+  library(here)
 })
 
-document_dir <- getwd()
-project_root <- normalizePath(
-  file.path(document_dir, ".."),
-  mustWork = TRUE
-)
-document_path <- file.path(
-  document_dir,
-  "16S_analysis_and_visualization.Rmd"
-)
-abundance_path <- file.path(
-  project_root,
-  "data",
-  "combined_relative_abundance.csv"
-)
-prepared_metadata_path <- file.path(project_root, "data", "metadata.tsv")
+document_path <- here("scripts/16S_analysis_and_visualization.Rmd")
+abundance_path <- here("data/combined_relative_abundance.csv")
+prepared_metadata_path <- here("data/metadata.tsv")
 
 selected_rank <- "S"
 top_n_taxa <- 10L
