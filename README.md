@@ -5,6 +5,42 @@ This repository contains the participant material for a two-hour computational
 xenic *Chaetoceros neogracilis* cultures across time using Oxford Nanopore 16S
 sequencing. Media controls are included as a separate condition.
 
+## Setup 
+
+The following steps describe how you get an up-to-date copy of this repo onto
+your VM and and define a variable to locate the path to your personal copy.
+
+## Step 1: open a terminal on your VM
+
+To open a terminal, use the keyboard shortcut **CTRL-Alt-T**. You can also open
+your home folder in the file browser via the bookmark on your desktop, right
+click below the folders and select "Open in terminal". Both alternatives open
+the terminal such that your current path in the terminal is your home folder.
+
+**All commands shown below must be copied and pasted in this terminal window.**
+To **copy**, either highlight and then copy with CTRL+C or use the "Copy to
+clipboard" button that might (does not always) show up on the right when you
+hover over the code you want to copy. To **paste** in the terminal right click
+and select "paste" in the terminal window.
+
+### Step 2: get your own copy of the repository to work in  
+
+For you to get the newest version of the repo we will clone it, copy it to your
+home folder that is. 
+```bash
+git clone https://git.embl.org/grp-zimmermann-kogadeeva/EMBO_MCD2026_Practical5_16S.git
+```
+
+Now you will find a folder `EMBO_MCD2026_Practical5_16S` in your home folder.
+
+### Step 3: open rstudio and the project
+
+Next, we will open rstudio and open a project within rstudio.
+
+1. Either click the button in the upper-left corner or press Windows key to open app menu and search for rstudio
+2. Within rstudio, click in the upper-right corner on button labelled "Project (None)" and click on "Open Project..."
+3. In the file-browser that popped-up, navigate to EMBO_MCD2026_Practical5_16S and click on file "EMBO_MCD2026_Practical5_16S.Rproj"
+
 ## Course workflow
 
 The practical deliberately separates pipeline exposure from biological
