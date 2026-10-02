@@ -52,14 +52,6 @@ Then, concatenate all files in the folder and save the new file one level up in 
 cat * > "${DATAROOT}${HUB}/NanoporeConcat/${barcode}_concat.fastq.gz"
 ```
 
-## 4. Install nextflow into conda env and activate it 
-
-Nextflow is a workflow managing software that we need to run Nanoclust, the software that we use to assign taxonomy to our reads.
-
-```
-conda activate nanoclust
-```
-
 ## 5. Run NanoCLUST
 To run NanoCLUST, first navigate to the root path of the copy of NanoCLUST on your VM.
 ```bash
@@ -75,6 +67,7 @@ output_dir="${DATAROOT}/${HUB}/OutputData/${barcode}"
 
 Now you are ready to run NanoCLUST. Note that the command below can fail initially, in which case it should be sufficient to start the command a second time.
 ```bash
+pixi run \
 nextflow run main.nf -profile conda --umap_set_size 130000 \
                                     --cluster_sel_epsilon 0.25\
                                     --min_cluster_size 50 \
