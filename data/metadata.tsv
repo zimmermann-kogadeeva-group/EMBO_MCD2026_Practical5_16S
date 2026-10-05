@@ -9,17 +9,11 @@ barcode07	MG024C_07	1	Axenic	T02	a	6.75	1.44
 barcode08	MG024C_08	1	Axenic	T02	b	7.65	1.06	
 barcode09	MG024C_09	1	Xenic	T02	a	9.05	4.34	
 barcode10	MG024C_10	1	Xenic	T02	b	12.05	7.16	
-barcode11	MG024C_11	1	Axenic	T08	a	11.6	5.66	
-barcode12	MG024C_12	1	Axenic	T08	b	15.15	7.44	
+barcode11	MG024C_11	1	Axenic	T07	a	11.6	5.66	
+barcode12	MG024C_12	1	Axenic	T07	b	15.15	7.44	
 barcode13	MG024C_13	1	Xenic	T07	a	24.55	15.5	
 barcode14	MG024C_14	1	Xenic	T07	b	23.6	15.3	
 barcode15	MG024C_15	1	Axenic	T14	a	27	13.6	
 barcode16	MG024C_16	1	Axenic	T14	b	28.6	13.2	
 barcode17	MG024C_17	1	Xenic	T14	a	69.45	44.8	
 barcode18	MG024C_18	1	Xenic	T14	b	68.35	49.2	
-barcode19	MG024C_19	1	Vincent_19			17.3	7.9	
-barcode20	MG024C_20	1	Vincent_20			25.65	20.6	
-barcode21	MG024C_21	1	Vincent_21			7.85	1.89	
-barcode22	MG024C_22	1	Vincent_22			244.7	176	diluted 1:5 in water for QUBIT HS Kit
-barcode23	MG024C_23	1	Vincent_23			19.35	9.74	
-barcode24	MG024C_24	1	Vincent_24			16.8	5.48	
