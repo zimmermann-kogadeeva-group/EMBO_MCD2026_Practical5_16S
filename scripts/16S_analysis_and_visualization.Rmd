@@ -1,5 +1,5 @@
 ---
-title: "From rel. abundance data to microbial community dynamics"
+title: "From relative-abundance profiles to microbial community composition over time"
 subtitle: "Computational 16S practical — EMBO Microbial Communities 2026"
 author: "Fabian Springer"
 date: "7 October 2026"
@@ -29,11 +29,11 @@ suppressPackageStartupMessages({
   library(here)
 })
 
-document_path <- here("scripts/16S_analysis_and_visualization.Rmd")
 abundance_path <- here("data/combined_relative_abundance.csv")
 prepared_metadata_path <- here("data/metadata.tsv")
 
 selected_rank <- "S"
+expected_tax_ranks <- c("O", "F", "G", "S")
 top_n_taxa <- 10L
 sum_tolerance <- 1e-6
 ```
@@ -44,23 +44,32 @@ By the end of this practical, you should be able to:
 
 1. inspect and validate a taxonomic relative-abundance table;
 2. reshape sparse taxonomic results into a complete sample-by-taxon matrix;
-3. visualize community composition without forgetting that the data are compositional;
-4. compare samples using Bray–Curtis dissimilarity and principal coordinate analysis (PCoA); and
-5. connect barcode-level results to the experimental design using sample metadata.
+3. visualize and interpret community composition while accounting for the compositional nature of relative-abundance data;
+4. calculate and interpret observed species-level assignment richness and Shannon diversity;
+5. compare samples using Bray–Curtis dissimilarity and principal coordinate analysis (PCoA); and
+6. examine longitudinal changes in species-level relative abundances across experimental conditions and biological replicates.
 
 > **Practical scope.** Taxonomic classification has already been run. We start from the combined NanoCLUST relative-abundance output so that the session can focus on interpretation rather than waiting for a sequencing pipeline.
 
+# Experimental design and input data
+
+The prepared dataset contains 18 samples. Axenic and xenic cultures were
+sampled at `T00`, `T02`, `T07`, and `T14`, with two biological replicates per
+condition and timepoint. Two media controls are available at `T00` only.
+
+The NanoCLUST table contains classified relative-abundance profiles at order,
+family, genus, and species rank. It does not contain raw sequencing reads or
+per-sample read counts. Taxonomic names should therefore be interpreted as
+classifier assignments rather than confirmed organism identities.
+
 Before loading the taxonomic profiles, import the cleaned experimental sample
 sheet. Its `Sample_ID` column contains the barcode identifier used by the
-NanoCLUST output. The identity of the six `Vincent_*` samples is unresolved, so
-they are excluded from both the metadata and abundance profiles before any
-summaries, plots, or distance calculations. They can be restored once their
-experimental role has been clarified.
+NanoCLUST output.
 
 ```{r import-experimental-metadata}
 stopifnot(file.exists(prepared_metadata_path))
 
-experimental_metadata_raw_df <- read_tsv(
+experimental_metadata_df <- read_tsv(
   prepared_metadata_path,
   show_col_types = FALSE,
   progress = FALSE
@@ -74,14 +83,13 @@ stopifnot(
       "axenic_xenic_media",
       "timepoint_d",
       "replicate"
-    ) %in% names(experimental_metadata_raw_df)
+    ) %in% names(experimental_metadata_df)
   ),
-  !anyNA(experimental_metadata_raw_df$Sample_ID),
-  !anyDuplicated(experimental_metadata_raw_df$Sample_ID)
+  !anyNA(experimental_metadata_df$Sample_ID),
+  !anyDuplicated(experimental_metadata_df$Sample_ID)
 )
 
-sample_meta_df <- experimental_metadata_raw_df %>%
-  filter(!str_detect(axenic_xenic_media, "^Vincent_")) %>%
+sample_meta_df <- experimental_metadata_df %>%
   mutate(
     condition = axenic_xenic_media,
     condition = factor(condition, levels = c("Axenic", "Xenic", "Media")),
@@ -104,7 +112,6 @@ sample_meta_df <- experimental_metadata_raw_df %>%
   )
 
 stopifnot(
-  nrow(experimental_metadata_raw_df) - nrow(sample_meta_df) == 6L,
   nrow(sample_meta_df) == 18L,
   !anyNA(
     sample_meta_df[
@@ -122,7 +129,7 @@ stopifnot(
 )
 ```
 
-# 1. Load and inspect the NanoCLUST output
+# Load and inspect the NanoCLUST output
 
 The input contains one taxonomic assignment per sample and taxonomic rank. `tax` uses the codes `O`, `F`, `G`, and `S` for order, family, genus, and species.
 
@@ -146,19 +153,13 @@ abundance_df <- abundance_raw_df %>%
     tax_rank = tax,
     taxon = taxid,
     rel_abundance = as.numeric(rel_abundance)
-  ) %>%
-  semi_join(
-    sample_meta_df %>% select(Sample_ID),
-    by = "Sample_ID"
   )
-
-# get all available tax ranks
-all_tax_ranks <- unique(abundance_df$tax_rank)
 
 stopifnot(
   !anyNA(abundance_df),
   !anyDuplicated(abundance_df[c("Sample_ID", "tax_rank", "taxon")]),
   setequal(sample_meta_df$Sample_ID, abundance_df$Sample_ID),
+  setequal(expected_tax_ranks, abundance_df$tax_rank),
   all(abundance_df$rel_abundance >= 0),
   all(abundance_df$rel_abundance <= 1)
 )
@@ -174,8 +175,7 @@ input_summary_df <- abundance_df %>%
   summarise(
     rank = unname(rank_labels[first(tax_rank)]),
     samples = n_distinct(Sample_ID),
-    taxa = n_distinct(taxon),
-    nonzero_assignments = n(),
+    unique_taxa = n_distinct(taxon),
     .groups = "drop"
   ) %>%
   select(rank, everything(), -tax_rank)
@@ -205,7 +205,7 @@ profile_sum_df %>%
 
 **Discuss:** What information can we check in a relative-abundance table? What information has already been lost compared with the raw read counts?
 
-# 2. Choose a taxonomic rank and complete missing combinations
+# Choose a taxonomic rank and complete missing combinations
 
 We use species-level assignments for this practical because full-length Nanopore 16S reads can provide fine taxonomic resolution. Species labels are still hypotheses: classification depends on sequence quality, the reference database, conserved 16S regions, and the classifier.
 
@@ -229,7 +229,7 @@ completed_sum_df <- analysis_df %>%
 stopifnot(all(abs(completed_sum_df$profile_sum - 1) < sum_tolerance))
 ```
 
-# 3. Which organisms dominate the profiles?
+# Which organisms dominate the profiles?
 
 A stacked bar chart gives an intuitive first view. To keep the legend readable, the ten most abundant taxa across all samples are shown individually and the remainder are grouped as `Other taxa`.
 
@@ -302,28 +302,61 @@ composition_plot <- ggplot(
 composition_plot
 ```
 
-```{r dominant-taxa-summary}
-dominant_taxon_df <- analysis_df %>%
-  group_by(Sample_ID) %>%
-  slice_max(rel_abundance, n = 1, with_ties = FALSE) %>%
-  ungroup()
+## Stop here and discuss
 
-dominant_taxon_df %>%
-  count(taxon, name = "samples_dominated", sort = TRUE) %>%
-  knitr::kable()
-```
+Before continuing, examine the species-composition plot.
 
-**Discuss:** A highly abundant assignment may represent a bacterial community member, a host-associated organelle signal, contamination, or a classification artefact. What additional evidence would you want before interpreting it biologically?
+- Is this community composition what you expected?
+- Which assignment dominates the axenic samples?
+- What kind of organism is *Gansulinema desertorum*?
+- Why do we not see *Chaetoceros neogracilis*, even though the diatom is
+  present in every culture sample?
+- Why might a cyanobacterial 16S sequence be amplified from a eukaryotic alga?
+- What additional evidence would you need to confirm the origin of these
+  reads?
 
-## A compositionality thought experiment
+<details>
+<summary><strong>Discussion</strong></summary>
+
+*Chaetoceros neogracilis* is a eukaryotic diatom and would normally be
+identified using a eukaryotic marker such as 18S rRNA. Its chloroplast,
+however, is evolutionarily derived from cyanobacteria and contains a 16S rRNA
+gene that can be amplified by bacterial 16S primers.
+
+The NCBI reference database used by NanoCLUST contains bacterial and archaeal
+16S sequences, but no *Chaetoceros* or other eukaryotic algal references.
+*Gansulinema desertorum* is a cyanobacterium. A plausible explanation is
+therefore that chloroplast-derived reads are being assigned to the closest
+available cyanobacterial reference.
+
+The abundance pattern supports this interpretation, especially in the axenic
+samples, but does not prove it. Confirmation would require examining the read
+sequences and their alignments against suitable chloroplast references.
+
+</details>
+
+## A note on compositional data
 
 Every sample sums to 100%. If one taxon doubles while all absolute cell counts remain unchanged, the relative abundance of every other taxon must fall. Therefore, relative abundance alone cannot tell us whether a taxon grew, declined, or merely changed relative to another organism.
 
-# 4. Compare complete communities with Bray–Curtis dissimilarity
+# Calculating and visualizing alpha diversity
 
-Bray–Curtis dissimilarity compares the complete abundance profiles of two samples. It is zero for identical profiles and approaches one as profiles become increasingly different.
+Alpha diversity describes the diversity within one sample. Here we calculate
+two complementary species-level metrics:
 
-```{r bray-curtis-pcoa}
+- **Observed species-level assignment richness** is the number of assignments
+  with relative abundance greater than zero. ("How many distinct species-level
+  assignments were reported?")
+- **Shannon diversity** increases when a sample contains more unique taxa and
+  when their relative abundances are more even. ("How diverse is the community composition?")
+
+These are descriptive values calculated from the supplied classified relative
+abundances. Without raw read counts, we cannot evaluate sequencing depth,
+rarefy profiles to a common depth, or distinguish a true absence from an
+assignment below the detection threshold.
+
+```{r calculate-alpha-diversity}
+# convert to matrix
 species_mat <- analysis_df %>%
   pivot_wider(names_from = taxon, values_from = rel_abundance) %>%
   arrange(match(Sample_ID, sample_order)) %>%
@@ -333,10 +366,97 @@ species_mat <- analysis_df %>%
 stopifnot(
   is.numeric(species_mat),
   !anyNA(species_mat),
-  all(abs(rowSums(species_mat) - 1) < sum_tolerance)
+  all(species_mat >= 0),
+  all(abs(rowSums(species_mat) - 1) < sum_tolerance),
+  identical(rownames(species_mat), sample_order)
 )
 
+# generate output dataframe with observed richness and Shannon diversity
+alpha_diversity_df <- tibble(
+  Sample_ID = rownames(species_mat),
+  observed_richness = rowSums(species_mat > 0),
+  shannon_diversity = vegan::diversity(species_mat, index = "shannon")
+) %>%
+  left_join(
+    sample_meta_df %>%
+      select(Sample_ID, condition, timepoint, replicate),
+    by = "Sample_ID"
+  )
+
+stopifnot(
+  nrow(alpha_diversity_df) == nrow(sample_meta_df),
+  !anyNA(alpha_diversity_df),
+  !anyDuplicated(alpha_diversity_df$Sample_ID),
+  all(is.finite(alpha_diversity_df$shannon_diversity)),
+  all(alpha_diversity_df$observed_richness > 0)
+)
+```
+
+```{r observed-richness-plot}
+ggplot(
+  alpha_diversity_df,
+  aes(
+    x = timepoint,
+    y = observed_richness,
+    shape = replicate,
+    group = replicate
+  )
+) +
+  geom_point(size = 3, position = position_dodge(width = 0.3)) +
+  facet_wrap(~condition) +
+  scale_x_continuous(breaks = sort(unique(alpha_diversity_df$timepoint))) +
+  scale_y_continuous(breaks = breaks_pretty()) +
+  labs(
+    title = "Observed species-level assignment richness through time",
+    subtitle = "Each point is one sample",
+    x = "Timepoint (days)",
+    y = "Observed species-level assignments",
+    shape = "Replicate"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(panel.grid.minor = element_blank())
+```
+
+```{r shannon-diversity-plot}
+ggplot(
+  alpha_diversity_df,
+  aes(
+    x = timepoint,
+    y = shannon_diversity,
+    shape = replicate,
+    group = replicate
+  )
+) +
+  geom_point(size = 3, position = position_dodge(width = 0.3)) +
+  facet_wrap(~condition) +
+  scale_x_continuous(breaks = sort(unique(alpha_diversity_df$timepoint))) +
+  labs(
+    title = "Shannon diversity through time",
+    subtitle = "Each point is one sample",
+    x = "Timepoint (days)",
+    y = "Shannon diversity",
+    shape = "Replicate"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(panel.grid.minor = element_blank())
+```
+
+**Discuss:** Do richness and Shannon diversity tell the same story? Which
+metric changes when a sample has the same number of assignments but becomes
+dominated by one of them? Are replicate patterns consistent within each
+condition?
+
+# Compare complete communities with Bray–Curtis dissimilarity (beta diversity)
+
+Bray–Curtis dissimilarity compares the complete abundance profiles of two samples. It is zero for identical profiles and approaches one as profiles become increasingly different.
+
+```{r bray-curtis-pcoa}
+# Compute a pairwise distance matrix
 bray_distance <- vegdist(species_mat, method = "bray")
+
+# Compute principal coordinates (PCoA) from the distance matrix. Unlike PCA,
+# PCoA can represent relationships defined by a non-Euclidean dissimilarity
+# such as Bray–Curtis.
 pcoa_fit <- cmdscale(bray_distance, k = 2, eig = TRUE, add = TRUE)
 
 positive_eigenvalues <- pcoa_fit$eig[pcoa_fit$eig > 0]
@@ -378,33 +498,135 @@ pcoa_plot <- ggplot(pcoa_df, aes(PCo1, PCo2, color = condition)) +
   labs(
     title = "Bray-Curtis PCoA of species profiles",
     subtitle = "Each point is one sample; labels show timepoint and replicate",
-    x = sprintf("PCo1 (%.1f%%)", axis_variance[1]),
-    y = sprintf("PCo2 (%.1f%%)", axis_variance[2]),
+    x = paste0("PCo1 (", round(axis_variance[1], 1), "% of variation)"),
+    y = paste0("PCo2 (", round(axis_variance[2], 1), "% of variation)"),
     color = "Condition"
   ) +
-  coord_equal() +
   theme_bw(base_size = 13) +
-  theme(panel.grid.minor = element_blank())
+  theme(
+    aspect.ratio = 0.65,
+    panel.grid.minor = element_blank()
+  )
 
 pcoa_plot
 ```
 
-**Discuss:** Which samples are similar? Do the clusters reflect condition,
-time, sequencing artefacts, or host-associated signal?
+The media controls are compositionally distinct from the culture samples and
+strongly influence the ordination. In particular, one media-control replicate
+lies far from all other samples along PCoA2. To see how such samples can affect
+the displayed axes, repeat the complete distance calculation and PCoA after
+restricting the analysis to the axenic and xenic cultures. Filtering points
+from the previous plot would not be equivalent because the media controls
+would still have influenced the fitted coordinates.
 
-# 5. Follow abundant taxa through time
+```{r bray-curtis-pcoa-without-media}
+culture_sample_meta_df <- sample_meta_df %>%
+  filter(condition %in% c("Axenic", "Xenic")) %>%
+  mutate(condition = droplevels(condition))
 
-The retained experimental metadata map every axenic, xenic, and media sample
-to its condition, sampling time in days, and biological replicate.
+culture_species_mat <- species_mat[culture_sample_meta_df$Sample_ID, , drop = FALSE]
+
+stopifnot(
+  identical(rownames(culture_species_mat), culture_sample_meta_df$Sample_ID),
+  all(abs(rowSums(culture_species_mat) - 1) < sum_tolerance),
+  identical(levels(culture_sample_meta_df$condition), c("Axenic", "Xenic"))
+)
+
+culture_bray_distance <- vegdist(culture_species_mat, method = "bray")
+culture_pcoa_fit <- cmdscale(
+  culture_bray_distance,
+  k = 2,
+  eig = TRUE,
+  add = TRUE
+)
+
+culture_positive_eigenvalues <- culture_pcoa_fit$eig[
+  culture_pcoa_fit$eig > 0
+]
+culture_axis_variance <- 100 * culture_pcoa_fit$eig[1:2] /
+  sum(culture_positive_eigenvalues)
+
+culture_pcoa_df <- as_tibble(
+  culture_pcoa_fit$points,
+  rownames = "Sample_ID"
+) %>%
+  rename(PCo1 = V1, PCo2 = V2) %>%
+  left_join(
+    culture_sample_meta_df %>%
+      select(Sample_ID, sample_label, condition),
+    by = "Sample_ID"
+  )
+
+stopifnot(
+  nrow(culture_pcoa_df) == nrow(culture_sample_meta_df),
+  !anyNA(culture_pcoa_df[c("Sample_ID", "sample_label", "condition")])
+)
+```
+
+```{r pcoa-plot-without-media}
+culture_pcoa_plot <- ggplot(
+  culture_pcoa_df,
+  aes(PCo1, PCo2, color = condition)
+) +
+  geom_point(size = 3) +
+  geom_text_repel(
+    aes(label = sample_label),
+    size = 3,
+    max.overlaps = 20,
+    min.segment.length = 0,
+    seed = 420
+  ) +
+  scale_color_manual(
+    values = condition_colors[levels(culture_sample_meta_df$condition)]
+  ) +
+  labs(
+    title = "Bray-Curtis PCoA without media controls",
+    subtitle = "Distances and coordinates were recomputed for axenic and xenic cultures",
+    x = paste0("PCo1 (", round(culture_axis_variance[1], 1), "% of variation)"),
+    y = paste0("PCo2 (", round(culture_axis_variance[2], 1), "% of variation)"),
+    color = "Condition"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    aspect.ratio = 0.65,
+    panel.grid.minor = element_blank()
+  )
+
+culture_pcoa_plot
+```
+
+**Discuss:** How does removing the compositionally distinct media controls
+change the apparent separation among culture samples? Which samples are
+similar? Do the clusters reflect condition, time, sequencing artefacts, or
+host-associated signal? How does this match what we saw in the barplot with the most abundant taxa? 
+
+# Follow abundant taxa through time
+
+Now we want to focus on individual taxa: How does the relative abundance of the most abundant taxa change over time?
+
 
 ```{r taxon-time-courses}
-time_course_taxa <- taxon_summary_df %>%
+time_course_analysis_df <- analysis_df %>%
+  semi_join(
+    culture_sample_meta_df %>% select(Sample_ID),
+    by = "Sample_ID"
+  )
+
+time_course_taxa <- time_course_analysis_df %>%
+  group_by(taxon) %>%
+  summarise(mean_abundance = mean(rel_abundance), .groups = "drop") %>%
+  arrange(desc(mean_abundance)) %>%
   slice_head(n = 6) %>%
   pull(taxon)
 
-time_course_df <- analysis_df %>%
+time_course_df <- time_course_analysis_df %>%
   filter(taxon %in% time_course_taxa) %>%
-  left_join(sample_meta_df, by = "Sample_ID")
+  left_join(culture_sample_meta_df, by = "Sample_ID")
+
+stopifnot(
+  setequal(unique(time_course_df$condition), c("Axenic", "Xenic")),
+  !anyNA(time_course_df[c("Sample_ID", "condition", "timepoint", "replicate")])
+)
 
 ggplot(
   time_course_df,
@@ -418,7 +640,10 @@ ggplot(
   geom_line(alpha = 0.55) +
   geom_point(aes(shape = replicate), size = 2) +
   facet_wrap(~taxon, scales = "free_y") +
-  scale_color_manual(values = condition_colors) +
+  scale_x_continuous(breaks = sort(unique(time_course_df$timepoint))) +
+  scale_color_manual(
+    values = condition_colors[levels(culture_sample_meta_df$condition)]
+  ) +
   scale_y_continuous(labels = label_percent()) +
   labs(
     title = "Trajectories of the six most abundant assignments",
@@ -434,32 +659,76 @@ ggplot(
   )
 ```
 
-**Discuss:** Do replicate cultures follow similar trajectories? Which changes appear condition-specific? What could relative abundance conceal?
+**Discuss:** Do all taxa follow similar trajectories? If not, what could
+explain the differences? How does the compositional nature of the data affect
+your interpretation?
 
-# 6. What we can—and cannot—conclude
+# Main findings and interpretation
 
-## Supported by this table
+The analyses reveal clear differences between the axenic and xenic cultures,
+as well as changes within the xenic cultures over time.
 
-- which taxonomic assignments dominate each relative profile;
-- which samples have similar overall species compositions;
-- whether replicate trajectories appear qualitatively consistent once metadata are added; and
-- which taxa are candidates for follow-up.
+## Main findings
 
-## Not supported without additional inputs
+- All eight axenic samples are dominated by the assignment *Gansulinema
+  desertorum*, with a mean relative abundance of 99.7%. Their observed richness
+  is only two or three assignments, and their Shannon diversity is close to
+  zero.
+- The xenic samples contain 10--12 assignments and have much higher Shannon
+  diversity than the axenic samples. Their mean richness remains stable over
+  time, whereas mean Shannon diversity changes from 1.34 at T0 to 1.22 at T2,
+  1.50 at T7, and 1.96 at T14. The later xenic profiles are therefore more even,
+  rather than richer in detected assignments.
+- The dominant assignments in the xenic cultures change over time. At T0,
+  *Gansulinema desertorum*, *Limnobacter thiooxidans*, and *Halopseudomonas
+  laoshanensis* account for most of the mean relative abundance. At T7,
+  *Limnobacter thiooxidans* has the highest mean abundance (39.4%). By T14,
+  *Gansulinema desertorum* and *Limnobacter thiooxidans* decrease to 25.0% and
+  22.0%, and *Yoonia vestfoldensis* is the third most abundant assignment at
+  15.6%.
+- In the culture-only PCoA, the axenic and xenic samples separate along PCoA1.
+  The axenic samples form a tight group, whereas the xenic samples are more
+  dispersed and the T14 xenic samples shift along PCoA2.
+- The two media controls differ strongly from one another. One lies far from
+  all culture samples and strongly affects the PCoA when the controls are
+  included.
 
-- sequencing depth or library-size quality control;
-- rarefaction or count-based alpha diversity;
-- absolute microbial growth or decline;
-- a reliable xenic/axenic or time-course interpretation without barcode metadata; and
-- confirmatory hypothesis testing without a prespecified repeated-measures design.
+## What the current data cannot show
+
+- The relative-abundance table does not contain read counts or quality metrics,
+  so we cannot assess sequencing depth, classification yield, detection limits,
+  or count-standardized diversity.
+- Relative abundance cannot show whether a taxon increased or decreased in
+  absolute abundance because every sample profile sums to 100%.
+- Species-level classifier labels do not confirm that the named organisms were
+  present. In particular, the dominant cyanobacterial assignment in the axenic
+  cultures may represent chloroplast-derived 16S reads from the diatom.
+- These exploratory plots do not test time or condition effects, establish
+  causal relationships, or provide a media-control time course.
+
+## Biological interpretation and discussion
+
+The axenic cultures remain almost exclusively dominated by the *Gansulinema
+desertorum* assignment throughout the experiment. In contrast, the xenic
+cultures have richer classified profiles in which relative abundances change
+and become more even at later timepoints. This pattern is consistent with
+changing community composition, but relative abundance alone cannot reveal
+whether individual populations grew or declined. The putative chloroplast
+origin of the dominant axenic assignment also remains a hypothesis that would
+require sequence-level confirmation.
+
+- Why might a diatom culture produce a cyanobacterial 16S assignment?
+- Why does Shannon diversity increase from T2 to T14 while observed richness
+  remains almost unchanged?
+- Which temporal patterns are similar between replicates, and where do the
+  replicates differ?
+- Which additional measurements would allow us to confirm the taxonomic
+  assignments and distinguish relative changes from absolute population
+  changes?
 
 # Further steps (optional)
 
-> **Draft extension.** These prompts provide a temporary starting point for
-> participants who finish early. Trainers can refine or replace them as the
-> practical develops.
-
-## Compare taxonomic ranks
+## Compare other taxonomic ranks
 
 Change `selected_rank` near the beginning of the document from species (`S`)
 to genus (`G`) and rerun the analysis.
@@ -468,33 +737,15 @@ to genus (`G`) and rerun the analysis.
 - Which apparent differences depend on the selected taxonomic rank?
 - Why might genus-level assignments be more reliable for some 16S reads?
 
-## Investigate an unexpected dominant assignment
+## Compute changes in relative abundance from baseline
 
-Choose one abundant assignment from the axenic samples and examine where it
-occurs across conditions and timepoints.
-
-- Is it specific to axenic cultures or also present in xenic and media samples?
-- Could it represent a bacterium, host-associated chloroplast signal,
-  contamination, or a database/classification limitation?
-- What additional evidence would distinguish these explanations?
-
-## Focus on one shared timepoint
-
-Choose a timepoint represented in both axenic and xenic cultures and compare
-the two biological replicates directly.
-
-- Are within-condition replicates more similar than the two conditions?
-- Which assignments contribute most strongly to the difference?
-- Does the conclusion change when you inspect individual samples instead of
-  condition averages?
-
-# Take-home messages
-
-1. Validate the input and experimental mapping before interpreting a plot.
-2. Missing taxon rows are not missing samples; complete them explicitly with zero.
-3. Relative abundances are constrained to sum to one and cannot establish absolute growth.
-4. Ordination summarizes differences—it does not explain their biological cause.
-5. Host-associated signal, database choice, and taxonomic uncertainty are part of the result, not nuisances to hide.
+- In the axenic samples, combine the two biological replicates by calculating
+  the mean relative abundance for each timepoint and species-level assignment.
+- For each later timepoint, subtract the mean relative abundance at `T00` and
+  express the result as a percentage-point change. Which assignments show the
+  largest positive or negative changes?
+- Why does a positive percentage-point change not prove that the corresponding
+  organism increased in absolute abundance?
 
 # Session information
 
