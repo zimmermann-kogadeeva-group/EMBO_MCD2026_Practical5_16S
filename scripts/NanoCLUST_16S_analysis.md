@@ -8,7 +8,12 @@ NanoCLUST takes as input the sequencing reads as fastq files and returns a csv f
 For more information on how NanoCLUST works have a look at the [Applications Note](https://academic.oup.com/bioinformatics/article/37/11/1600/5929694).
 
 
-First, you will need to clone the NanoCLUST repo
+First, you will need to set up a git plugin called git-lfs with:
+```bash
+git lfs install
+```
+
+Next, you will need to clone the NanoCLUST repo
 
 ```bash
 NCROOT="${HOME}/NanoCLUST/"
