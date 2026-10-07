@@ -34,7 +34,7 @@ prepared_metadata_path <- here("data/metadata.tsv")
 
 selected_rank <- "S"
 expected_tax_ranks <- c("O", "F", "G", "S")
-top_n_taxa <- 10L
+top_n_taxa <- 10
 sum_tolerance <- 1e-6
 ```
 
@@ -112,7 +112,7 @@ sample_meta_df <- experimental_metadata_df %>%
   )
 
 stopifnot(
-  nrow(sample_meta_df) == 18L,
+  nrow(sample_meta_df) == 18,
   !anyNA(
     sample_meta_df[
       c(
