@@ -35,7 +35,7 @@ barcode=barcode05
 
 The data are on a shared directory to which we create a variable as well. For the further analyis we use the reads that passed quality control. You will find them in `fastq_pass`. We change directory to there.
 ```bash
-DATAROOT="/g/teachinglab/data/EMBO_MCD2024/16S/"
+DATAROOT="/g/teachinglab/data/EMBO_MCD2026/16S/"
 DTROOT="${DATAROOT}${HUB}/${GROUP}"
 cd $DTROOT/fastq_pass
 ```
